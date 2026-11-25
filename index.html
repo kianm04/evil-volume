@@ -3,44 +3,496 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>my evil input</title>
+<title>scream volume</title>
 <style>
-  /* Everything you make goes inside #stage: exactly 800 × 400 pixels. The gallery shows
-     this box (shrunk to fit), so anything outside it won't be seen. */
   html, body { margin: 0; background: #292b47; color: #eceae3; font: 16px/1.5 ui-monospace, Menlo, Consolas, monospace; }
   #stage {
     width: 800px; height: 400px; overflow: hidden; position: relative;
-    display: grid; place-items: center; text-align: center;
-    background: #23243d;
+    background: #23243d; user-select: none;
   }
-
-  /* ---- the example below: delete it and build your own ---- */
-  .vol { font-size: 64px; margin: 0; }
-  button { font: inherit; color: inherit; background: #3f4168; border: 0; border-radius: 6px; padding: .6rem 1.2rem; cursor: pointer; }
-  .hint { color: #8d8aa6; font-size: 14px; }
+  #gl { position: absolute; inset: 0; width: 800px; height: 400px; display: block; }
+  #ui { position: absolute; left: 350px; right: 20px; top: 0; bottom: 0; perspective: 600px; pointer-events: none; }
+  #panel {
+    height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 12px; text-align: center; will-change: transform; transform-style: preserve-3d;
+  }
+  #panel > * { pointer-events: auto; }
+  #label { margin: 0; font-size: 15px; letter-spacing: .2em; text-transform: uppercase; color: #cfcce0; text-shadow: 0 2px 6px #000a; }
+  #numbox { height: 120px; display: grid; place-items: center; pointer-events: none; }
+  #num { margin: 0; font-size: 56px; font-weight: 700; line-height: 1; will-change: transform; text-shadow: 0 3px 10px #000a; }
+  #gauge { width: 360px; height: 14px; background: #15162acc; border-radius: 7px; overflow: hidden; }
+  #fill { height: 100%; width: 0; background: linear-gradient(90deg, #6dff9c, #ffd84a 60%, #ff4f6d); }
+  #btns { display: flex; align-items: center; gap: 14px; margin-top: 4px; }
+  button { font: inherit; color: inherit; border: 0; cursor: pointer; }
+  #pump {
+    font-size: 20px; font-weight: 700; background: #ff4f6d; color: #fff; border-radius: 10px;
+    padding: .6rem 1.6rem; box-shadow: 0 5px 0 #a11f3a; min-width: 150px;
+  }
+  #pump:active { translate: 0 4px; box-shadow: 0 1px 0 #a11f3a; }
+  #pump:disabled { opacity: .4; cursor: default; }
+  #ok { font-size: 13px; background: #3f4168; border-radius: 6px; padding: .3rem .7rem; }
+  #hint { margin: 0; font-size: 14px; min-height: 42px; max-width: 400px; color: #fff; text-shadow: 0 2px 6px #000c; }
+  #mute { position: absolute; top: 8px; right: 8px; z-index: 5; background: #0006; border-radius: 6px; padding: 2px 8px; font-size: 16px; }
+  #flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; z-index: 4; }
+  #dlg {
+    position: absolute; left: 50%; top: 50%; translate: -50% -50%; z-index: 6; display: none;
+    background: #eceae3; color: #23243d; border-radius: 10px; padding: 18px 26px; text-align: center;
+    box-shadow: 0 12px 40px #000a; white-space: nowrap;
+  }
+  #dlg p { margin: 0 0 12px; }
+  #dlg b { font-size: 22px; }
+  #dlg button { background: #23243d; color: #eceae3; border-radius: 6px; padding: .3rem 1.1rem; margin: 0 6px; }
+  #err { position: absolute; left: 12px; bottom: 8px; font-size: 12px; color: #ffb3c0; }
 </style>
 </head>
 <body>
 <div id="stage">
-  <!-- example evil input: volume you have to pump up by hand, and it leaks back down -->
-  <div>
-    <p class="vol"><span id="vol">0</span>%</p>
-    <button id="pump">pump volume</button>
-    <p class="hint">it leaks. keep pumping.</p>
+  <canvas id="gl" width="800" height="400"></canvas>
+  <div id="ui">
+    <div id="panel">
+      <p id="label">volume</p>
+      <div id="numbox"><p id="num">0%</p></div>
+      <div id="gauge"><div id="fill"></div></div>
+      <div id="btns">
+        <button id="pump">PUMP</button>
+        <button id="ok">OK</button>
+      </div>
+      <p id="hint">it leaks. keep pumping.</p>
+    </div>
   </div>
+  <div id="dlg">
+    <p>set volume to <b id="dv">0%</b> — are you sure?</p>
+    <button id="yes">yes</button><button id="no">no</button>
+  </div>
+  <div id="flash"></div>
+  <button id="mute" title="mute">🔊</button>
+  <div id="err"></div>
 </div>
-<script>
-  // the example: delete this too
-  let volume = 0;
-  const out = document.getElementById('vol');
-  document.getElementById('pump').addEventListener('click', () => {
-    volume = Math.min(100, volume + 7);
-    out.textContent = Math.round(volume);
+<script type="module">
+  let THREE;
+  try {
+    THREE = await import('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js');
+  } catch (e) {
+    document.getElementById('err').textContent = 'could not load three.js (needs internet)';
+    throw e;
+  }
+
+  const $ = id => document.getElementById(id);
+  const stage = $('stage');
+  const PUMP = 4;
+  const calm = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0.2 : 1;
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+
+  let volume = 0, state = 'play'; // play | popped
+  let kick = 0, grow = 1, last = performance.now();
+  let hum = 0;               // seconds of "muted" humming left
+  let voice = null;          // temporary silly voice {name, label, until, ...params}
+  let dialogAsked = null;    // volume when OK was clicked, while the dialog is open
+  let fixedMsg = '', fixedUntil = 0, hintAt = 0;
+  let mx = 0, my = 0;
+  const choir = [];
+
+  // #v=80 freezes the volume there, #v=80&c=6 also adds six choir faces (for screenshots)
+  const dbg = /v=(\d+)/.exec(location.hash);
+  const dbgChoir = /c=(\d+)/.exec(location.hash);
+
+  const VOICES = [
+    { name: 'opera',    label: '♪ it has decided to do opera ♪', pm: 1.0, lr: 6,  ld: 130, fm: 0.85, dr: 0.35, scale: 1.1 },
+    { name: 'chipmunk', label: 'it inhaled something',            pm: 2.3, fm: 1.5, dr: 1,   scale: 0.7,  tint: 0xc98a4b },
+    { name: 'demon',    label: 'oh no. it found the low notes',   pm: 0.4, fm: 0.72, dr: 2,  scale: 1.3,  tint: 0x5b1a7a },
+    { name: 'goat',     label: 'it is a goat now',                pm: 1.15, lr: 13, ld: 260, fm: 1.1, dr: 1, scale: 1, tint: 0xf2f2f2 },
+  ];
+
+  const LINES = [
+    'my landlord can hear this',
+    'this is only {n}% of my maximum',
+    'i have a family',
+    'why would you want it this loud',
+    'i used to be a slider',
+    'a normal volume control would not do this',
+    'please. the OK button is right there',
+    'i can taste the number {n}',
+    'this is fine. THIS IS FINE',
+    'who hurt you',
+    'the mute button is a lie',
+  ];
+
+  // ---------- sound: a synthesised scream, no audio files ----------
+  let ac, A;
+  function initAudio() {
+    if (ac) { ac.resume(); return; }
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    const master = ac.createGain(); master.gain.value = 0.55;
+    const limiter = ac.createDynamicsCompressor(); // keeps "loud" from becoming painful
+    limiter.threshold.value = -14; limiter.knee.value = 0; limiter.ratio.value = 20;
+    limiter.attack.value = 0.002; limiter.release.value = 0.1;
+    limiter.connect(master).connect(ac.destination);
+
+    const lips = ac.createBiquadFilter(); lips.type = 'lowpass'; lips.frequency.value = 18000; lips.connect(limiter);
+    const voiceGain = ac.createGain(); voiceGain.gain.value = 0; voiceGain.connect(lips);
+    const mix = ac.createGain(); mix.connect(voiceGain);
+    const shaper = ac.createWaveShaper(); shaper.oversample = '2x';
+    const curve = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) curve[i] = Math.tanh(3 * (i / 511.5 - 1));
+    shaper.curve = curve;
+    const pre = ac.createGain(); pre.gain.value = 0.4; pre.connect(shaper);
+
+    // three bandpass filters shape the buzz into an "AAAH" vowel
+    const formants = [[800, 4, 1], [1400, 5, 0.7], [2900, 6, 0.5]].map(([f, q, g]) => {
+      const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = q;
+      const gg = ac.createGain(); gg.gain.value = g;
+      shaper.connect(bp).connect(gg).connect(mix);
+      return bp;
+    });
+
+    const lfo = ac.createOscillator(); lfo.frequency.value = 5;
+    const lfoGain = ac.createGain(); lfoGain.gain.value = 8; lfo.connect(lfoGain); lfo.start();
+    const oscs = [0, 9, -11].map(d => {
+      const o = ac.createOscillator(); o.type = 'sawtooth'; o.detune.value = d; o.frequency.value = 200;
+      lfoGain.connect(o.detune); o.connect(pre); o.start(); return o;
+    });
+
+    const nbuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+    const nd = nbuf.getChannelData(0);
+    for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+    const noise = ac.createBufferSource(); noise.buffer = nbuf; noise.loop = true;
+    const nbp = ac.createBiquadFilter(); nbp.type = 'bandpass'; nbp.frequency.value = 2600; nbp.Q.value = 0.8;
+    const noiseGain = ac.createGain(); noiseGain.gain.value = 0;
+    noise.connect(nbp).connect(noiseGain).connect(mix); noise.start();
+
+    A = { master, limiter, lips, voiceGain, pre, formants, lfo, lfoGain, oscs, noiseGain, nbuf };
+    choir.forEach(addChoirOsc);
+  }
+
+  function addChoirOsc(c) {
+    if (!ac || c.osc) return;
+    c.osc = ac.createOscillator(); c.osc.type = 'sawtooth'; c.osc.frequency.value = 200 * c.ratio;
+    c.gain = ac.createGain(); c.gain.gain.value = 0.3;
+    A.lfoGain.connect(c.osc.detune);
+    c.osc.connect(c.gain).connect(A.pre); c.osc.start();
+  }
+
+  function updateAudio(v) {
+    if (!ac) return;
+    const t = ac.currentTime, on = state === 'play' && v > 0.005;
+    const V = voice || {};
+    // pitch climbs with volume: ~200 Hz groan at 0% up to ~570 Hz shriek at 100%
+    const wobble = 1 + Math.sin(t * 23) * Math.sin(t * 7.3) * 0.04 * v;
+    const f = 200 * Math.pow(2, v * 1.5) * wobble * (V.pm || 1);
+    A.oscs.forEach(o => o.frequency.setTargetAtTime(f, t, 0.03));
+    choir.forEach(c => c.osc && c.osc.frequency.setTargetAtTime(f * c.ratio, t, 0.05));
+    A.lfo.frequency.setTargetAtTime(V.lr || 5 + 7 * v, t, 0.05);
+    A.lfoGain.gain.setTargetAtTime(V.ld || 8 + 70 * v * v, t, 0.05);
+    A.pre.gain.setTargetAtTime((0.4 + 2.2 * v) * (V.dr || 1), t, 0.05);
+    const fm = V.fm || 1;
+    A.formants[0].frequency.setTargetAtTime((700 + 500 * v) * fm, t, 0.05);
+    A.formants[1].frequency.setTargetAtTime(1400 * fm, t, 0.05);
+    A.formants[2].frequency.setTargetAtTime(2900 * fm, t, 0.05);
+    A.noiseGain.gain.setTargetAtTime(on && !hum ? v * v * v * 0.5 : 0, t, 0.05);
+    A.lips.frequency.setTargetAtTime(hum ? 320 : 18000, t, 0.03); // "muted" = humming through closed lips
+    A.voiceGain.gain.setTargetAtTime(on ? Math.pow(Math.min(1, v), 1.3) * 0.9 : 0, t, 0.04);
+  }
+
+  function popSound() {
+    if (!ac) return;
+    const t = ac.currentTime;
+    const n = ac.createBufferSource(); n.buffer = A.nbuf;
+    const g = ac.createGain(); g.gain.setValueAtTime(1, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    n.connect(g).connect(A.limiter); n.start(t); n.stop(t + 0.45);
+    const o = ac.createOscillator(); o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.3);
+    const og = ac.createGain(); og.gain.setValueAtTime(1, t); og.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+    o.connect(og).connect(A.limiter); o.start(t); o.stop(t + 0.4);
+  }
+
+  function ding() {
+    if (!ac) return;
+    const t = ac.currentTime;
+    [880, 1320].forEach((f, i) => {
+      const o = ac.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+      const g = ac.createGain(); g.gain.setValueAtTime(0.0001, t + i * 0.12);
+      g.gain.exponentialRampToValueAtTime(0.4, t + i * 0.12 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.12 + 0.9);
+      o.connect(g).connect(A.limiter); o.start(t); o.stop(t + 1.2);
+    });
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (ac) document.hidden ? ac.suspend() : ac.resume();
   });
-  setInterval(() => {
-    volume = Math.max(0, volume - 1);
-    out.textContent = Math.round(volume);
-  }, 120);
+
+  // ---------- 3D scene ----------
+  const renderer = new THREE.WebGLRenderer({ canvas: $('gl'), antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+  renderer.setSize(800, 400, false);
+  const scene = new THREE.Scene();
+  const BG0 = new THREE.Color(0x23243d), BG1 = new THREE.Color(0x960e28);
+  scene.background = BG0.clone();
+  scene.fog = new THREE.Fog(0x23243d, 9, 24);
+  const camera = new THREE.PerspectiveCamera(40, 2, 0.1, 100);
+  camera.position.set(0, 0.3, 7);
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x333355, 1.6));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.2); sun.position.set(3, 4, 5); scene.add(sun);
+  const panic = new THREE.PointLight(0xff2244, 0, 30); panic.position.set(-1, 0.5, 3.5); scene.add(panic);
+
+  const grid = new THREE.GridHelper(80, 80, 0xff4f6d, 0x55588f);
+  grid.position.y = -2.1; scene.add(grid);
+
+  const sphere = new THREE.SphereGeometry(1, 40, 28);
+  const box = new THREE.BoxGeometry(1, 1, 1);
+  const SKIN = new THREE.Color(0xffd9a8), RED = new THREE.Color(0xff4533), TMP = new THREE.Color();
+  const mats = {
+    white: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.25 }),
+    pupil: new THREE.MeshStandardMaterial({ color: 0x14141f, roughness: 0.2 }),
+    brow: new THREE.MeshStandardMaterial({ color: 0x3a2a22, roughness: 0.8 }),
+    mouth: new THREE.MeshBasicMaterial({ color: 0x2a0509 }),
+    tongue: new THREE.MeshStandardMaterial({ color: 0xe8506a, roughness: 0.5 }),
+  };
+
+  function makeHead() {
+    const g = new THREE.Group();
+    const skin = new THREE.MeshStandardMaterial({ color: 0xffd9a8, roughness: 0.5 });
+    const ball = new THREE.Mesh(sphere, skin); g.add(ball);
+    const eyes = [-1, 1].map(s => {
+      const eye = new THREE.Mesh(sphere, mats.white); eye.position.set(0.36 * s, 0.28, 0.84); g.add(eye);
+      const pupil = new THREE.Mesh(sphere, mats.pupil); pupil.position.z = 0.8; eye.add(pupil);
+      const brow = new THREE.Mesh(box, mats.brow); brow.scale.set(0.44, 0.09, 0.1); g.add(brow);
+      return { eye, pupil, brow, s };
+    });
+    const mouthG = new THREE.Group(); g.add(mouthG);
+    const mouth = new THREE.Mesh(sphere, mats.mouth); mouthG.add(mouth);
+    const tongue = new THREE.Mesh(sphere, mats.tongue); tongue.position.z = 0.1; mouthG.add(tongue);
+    const teeth = new THREE.Mesh(box, mats.white); teeth.position.z = 0.14; mouthG.add(teeth);
+
+    // e: 0 calm .. 1 full scream
+    g.userData.update = (e, closed, tint) => {
+      skin.color.copy(SKIN).lerp(RED, closed ? Math.min(1, e + 0.3) : e);
+      if (tint) skin.color.lerp(TMP.set(tint), 0.65);
+      ball.scale.x = closed ? 1.16 : 1; // puffed cheeks
+      for (const { eye, pupil, brow, s } of eyes) {
+        eye.scale.setScalar(0.2 * (1 + 0.7 * e));
+        eye.position.z = 0.84 + 0.14 * e;
+        pupil.scale.setScalar(0.45 * (1 - 0.5 * e));
+        pupil.position.x = (Math.random() - 0.5) * 0.3 * e * e;
+        pupil.position.y = (Math.random() - 0.5) * 0.3 * e * e;
+        brow.position.set(0.36 * s, 0.6 + 0.24 * e, 0.86 - 0.1 * e);
+        brow.rotation.z = -s * 0.5 * e; // inner ends go up: worried
+      }
+      const rx = closed ? 0.2 : 0.22 + 0.2 * e, ry = closed ? 0.025 : 0.03 + 0.45 * e;
+      const phi = 0.38 + 0.12 * e;
+      mouthG.position.set(0, -Math.sin(phi) * 0.9, Math.cos(phi) * 0.9);
+      mouthG.rotation.x = phi;
+      mouth.scale.set(rx, ry, 0.2);
+      tongue.position.y = -ry * 0.5; tongue.scale.set(rx * 0.55, ry * 0.38, 0.14);
+      teeth.position.y = ry * 0.72; teeth.scale.set(rx, ry * 0.24, 0.12);
+      teeth.visible = tongue.visible = ry > 0.1;
+    };
+    return g;
+  }
+
+  const main = makeHead();
+  const MAIN_POS = new THREE.Vector3(-2.35, 0.15, 0);
+  main.position.copy(MAIN_POS); scene.add(main);
+
+  // exploding bits
+  const bits = [];
+  const bitMats = [0xff4533, 0xffd9a8, 0xffffff, 0xe8506a, 0xffd84a].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.4 }));
+  function burst(pos, n, size) {
+    for (let i = 0; i < n; i++) {
+      const m = new THREE.Mesh(sphere, pick(bitMats));
+      m.position.copy(pos); m.scale.setScalar(rnd(0.05, 0.2) * size);
+      const a = rnd(0, Math.PI * 2), b = rnd(-1, 1), sp = rnd(3, 11);
+      m.userData.vel = new THREE.Vector3(Math.cos(a) * Math.sqrt(1 - b * b), b + 0.4, Math.sin(a) * Math.sqrt(1 - b * b)).multiplyScalar(sp);
+      m.userData.life = rnd(0.9, 1.7);
+      scene.add(m); bits.push(m);
+    }
+  }
+
+  // ---------- the choir ----------
+  function addChoir() {
+    if (choir.length >= 12) return;
+    const c = {
+      head: makeHead(),
+      pos: new THREE.Vector3(rnd(-4.8, 4.8), rnd(-1.3, 2.1), rnd(-7, -0.8)),
+      size: rnd(0.3, 0.62), phase: rnd(0, 10), age: 0, dying: 0,
+      ratio: pick([0.5, 0.75, 1.25, 1.5, 2]) * rnd(0.97, 1.03), // each one slightly out of tune
+    };
+    c.head.position.copy(c.pos); c.head.scale.setScalar(0.001);
+    scene.add(c.head); choir.push(c); addChoirOsc(c);
+  }
+  function removeChoir(c) {
+    scene.remove(c.head);
+    if (c.osc) { c.osc.stop(); c.osc.disconnect(); c.gain.disconnect(); }
+    choir.splice(choir.indexOf(c), 1);
+  }
+
+  // ---------- behaviour ----------
+  function pop() {
+    state = 'popped'; kick = 1; volume = 0; voice = null; hum = 0;
+    $('mute').textContent = '🔊';
+    popSound();
+    burst(main.position, 70, 1.3);
+    [...choir].forEach(c => { burst(c.pos, 10, c.size); removeChoir(c); });
+    main.visible = false;
+    $('pump').disabled = true;
+    $('flash').animate([{ opacity: 0.8 }, { opacity: 0 }], { duration: 350 });
+    setTimeout(() => { state = 'play'; grow = 0; main.visible = true; $('pump').disabled = false; }, 1300);
+  }
+
+  $('pump').addEventListener('click', () => {
+    initAudio();
+    if (state !== 'play') return;
+    volume += PUMP;
+    if (volume > 100) { pop(); return; }
+    const v = volume / 100;
+    if (v > 0.2 && Math.random() < 0.18 + 0.3 * v) addChoir();
+    if (v > 0.25 && !voice && !hum && Math.random() < 0.1) {
+      voice = { ...pick(VOICES), until: performance.now() + rnd(3000, 4500) };
+      fixedMsg = voice.label; fixedUntil = performance.now() + 1800;
+    }
+  });
+
+  // the mute button only makes it hold the scream in. pressure builds. then it comes back out.
+  $('mute').addEventListener('click', () => {
+    initAudio();
+    if (state !== 'play' || hum) return;
+    hum = 2.6; voice = null;
+    $('mute').textContent = '🤐';
+  });
+
+  // the OK button asks you to confirm a number that is still leaking
+  $('ok').addEventListener('click', () => {
+    initAudio();
+    dialogAsked = Math.round(Math.min(100, volume));
+    $('dlg').style.display = 'block';
+  });
+  $('no').addEventListener('click', () => { dialogAsked = null; $('dlg').style.display = 'none'; });
+  $('yes').addEventListener('click', () => {
+    const got = Math.round(Math.min(100, volume));
+    fixedMsg = `✔ volume saved as ${got}%.` + (got !== dialogAsked ? ` (you clicked OK at ${dialogAsked}%. too slow.)` : '');
+    fixedUntil = performance.now() + 4500;
+    ding();
+    dialogAsked = null; $('dlg').style.display = 'none';
+  });
+
+  stage.addEventListener('pointermove', ev => {
+    const r = stage.getBoundingClientRect();
+    mx = ((ev.clientX - r.left) / r.width) * 2 - 1;
+    my = ((ev.clientY - r.top) / r.height) * 2 - 1;
+  });
+
+  // ---------- per-frame ----------
+  function updateUI(v, e, now) {
+    const shown = Math.round(Math.min(100, volume));
+    $('num').textContent = shown + '%';
+    const ab = e * e * 7;
+    $('num').style.transform = `scale(${1 + 1.1 * e})`;
+    $('num').style.textShadow = ab > 0.3 ? `${ab}px 0 #ff2bd6, ${-ab}px 0 #2be4ff, 0 3px 10px #000a` : '';
+    $('fill').style.width = Math.min(100, volume) + '%';
+    $('pump').style.scale = state === 'play' ? 1 - 0.3 * e : 1;
+    if (dialogAsked !== null) $('dv').textContent = shown + '%';
+
+    const hint = $('hint');
+    if (now < fixedUntil) hint.textContent = fixedMsg;
+    else if (hum) hint.textContent = 'm' + 'm'.repeat(4 + Math.floor(Math.random() * 14)) + 'ph';
+    else if (state === 'popped') hint.textContent = '';
+    else if (v < 0.1) { hint.textContent = 'it leaks. keep pumping.'; hintAt = 0; }
+    else if (now > hintAt) {
+      hintAt = now + 2200;
+      const line = v > 0.85 && Math.random() < 0.5 ? 'A'.repeat(12 + Math.floor(Math.random() * 20))
+        : choir.length > 2 && Math.random() < 0.3 ? 'the neighbours are joining in'
+        : pick(LINES).replace('{n}', shown);
+      hint.textContent = e > 0.6 ? line.toUpperCase() : line;
+    }
+
+    // the panel tilts in 3D and rattles
+    const amp = (e * e * 6 + kick * 12) * calm;
+    $('panel').style.transform =
+      `translate(${(Math.random() - 0.5) * 2 * amp}px,${(Math.random() - 0.5) * 2 * amp}px) ` +
+      `rotateY(${-14 + Math.sin(now / 300) * 10 * e * calm}deg) rotateX(${Math.sin(now / 410) * 8 * e * calm}deg)`;
+  }
+
+  function update3D(v, e, dt, t) {
+    const mood = Math.pow(e, 1.5);
+    scene.background.copy(BG0).lerp(BG1, mood);
+    scene.fog.color.copy(scene.background);
+    panic.intensity = 60 * e * e * (0.7 + 0.3 * Math.sin(t * 30));
+    grid.position.z = (t * (1 + 14 * e)) % 1;
+
+    // main head
+    grow = Math.min(1, grow + dt * 3);
+    const V = voice || {};
+    const pulse = 1 + Math.sin(t * 40) * 0.03 * e;
+    main.scale.setScalar(1.3 * (0.86 + 0.22 * e) * (V.scale || 1) * pulse * (grow * (2 - grow)));
+    const j = e * e * 0.12 * calm + (hum ? 0.05 : 0);
+    main.position.set(MAIN_POS.x + (Math.random() - 0.5) * j, MAIN_POS.y + (Math.random() - 0.5) * j, MAIN_POS.z);
+    main.rotation.y = 0.25 + mx * 0.5 + Math.sin(t * 1.7) * 0.25 * e;
+    main.rotation.x = my * 0.3 - 0.3 * e + Math.sin(t * 2.3) * 0.1 * e; // head tips back to scream
+    main.rotation.z = Math.sin(t * 31) * 0.12 * e * e * calm;
+    main.userData.update(e, hum > 0, V.tint);
+
+    // choir
+    for (const c of [...choir]) {
+      c.age += dt;
+      if (c.dying) { c.dying -= dt; if (c.dying <= 0) { removeChoir(c); continue; } }
+      const inS = Math.min(1, c.age * 4), outS = c.dying ? c.dying / 0.25 : 1;
+      c.head.scale.setScalar(Math.max(0.001, c.size * (inS * (2.2 - 1.2 * inS)) * outS));
+      c.head.position.set(c.pos.x + Math.sin(t * 1.3 + c.phase) * 0.3, c.pos.y + Math.sin(t * 3 + c.phase) * 0.25, c.pos.z);
+      c.head.rotation.set(Math.sin(t * 2.1 + c.phase) * 0.3 - 0.2 * e, Math.sin(t * 1.6 + c.phase) * 0.7, Math.sin(t * 2.7 + c.phase) * 0.3);
+      c.head.userData.update(Math.max(0.15, e * (0.75 + 0.25 * Math.sin(t * 6 + c.phase))), hum > 0, null);
+    }
+
+    // bits
+    for (let i = bits.length - 1; i >= 0; i--) {
+      const m = bits[i];
+      m.userData.vel.y -= 14 * dt;
+      m.position.addScaledVector(m.userData.vel, dt);
+      m.userData.life -= dt;
+      if (m.userData.life < 0.3) m.scale.multiplyScalar(0.85);
+      if (m.userData.life <= 0) { scene.remove(m); bits.splice(i, 1); }
+    }
+
+    // camera pushes in and shakes
+    const sh = (e * e * 0.1 + kick * 0.35) * calm;
+    camera.position.set((Math.random() - 0.5) * sh + mx * 0.3, 0.3 + (Math.random() - 0.5) * sh - my * 0.15, 7 - 0.9 * e);
+    camera.rotation.z = (Math.random() - 0.5) * sh * 0.25;
+  }
+
+  let choirCull = 0;
+  function frame(now) {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (state === 'play') {
+      const v = volume / 100;
+      if (hum) {
+        volume += 7 * dt; // pressure builds while it holds it in
+        hum = Math.max(0, hum - dt);
+        if (!hum) { volume += 12; kick = 0.7; $('mute').textContent = '🔊'; }
+        if (volume > 100) pop();
+      } else if (!dbg) {
+        volume = Math.max(0, volume - (3 + 14 * v * v) * dt); // leaks faster the louder it is
+      }
+    }
+    if (voice && now > voice.until) voice = null;
+    // the choir drifts off once it goes quiet
+    choirCull -= dt;
+    if (volume < 6 && choirCull <= 0 && !dbgChoir) {
+      const c = choir.find(c => !c.dying);
+      if (c) { c.dying = 0.25; choirCull = 0.2; }
+    }
+    kick = Math.max(0, kick - dt * 2.5);
+
+    const v = volume / 100, e = Math.min(1, v);
+    updateAudio(v);
+    update3D(v, e, dt, now / 1000);
+    updateUI(v, e, now);
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+
+  if (dbg) volume = +dbg[1];
+  if (dbgChoir) for (let i = 0; i < +dbgChoir[1]; i++) addChoir();
+  requestAnimationFrame(frame);
 </script>
 </body>
 </html>
