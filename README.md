@@ -19,4 +19,4 @@ https://kianm04.github.io/evil-volume/
 
 ## how to run it
 
-open `index.html` in a browser. that's it. it loads three.js from a CDN, so it needs internet. (turn your speakers down first.)
+open `index.html` in a browser.
